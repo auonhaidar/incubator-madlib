@@ -50,6 +50,10 @@ m4_include(`SQLCommon.m4')
 
 @brief Finds k nearest data points to the given data point and outputs majority vote value of output classes in case of classification and average value of target values for regression task.
 
+\warning <em> This MADlib method is still in early stage development. There may be some
+issues that will be addressed in a future version. Interface and implementation
+is subject to change. </em>
+
 @anchor knn
 
 k-Nearest Neighbors is a method for finding k closest points to a
@@ -133,7 +137,7 @@ The output of the KNN module is a table with the following columns:
         <td>DOUBLE PRECISION[]. The test data points.</td>
     </tr>
     <tr>
-        <th>predLabel</th>
+        <th>prediction</th>
         <td>INTEGER. The output of KNN- label in case of classification, average value in case of regression.</td>
     </tr>
 </table>
@@ -187,7 +191,7 @@ SELECT * from madlib_knn_result_classification;
 </pre>
 Result:
 <pre class="result">
-  id |   data   | predLabel
+  id |   data   | prediction
 -----+----------+-----------
    1 | {2,1}    |       1
    2 | {2,6}    |       1
@@ -213,7 +217,7 @@ SELECT * from madlib_knn_result_regression;
 </pre>
 Result:
 <pre class="result">
-  id |   data   | predLabel
+  id |   data   | prediction
 -----+----------+-----------
    1 | {2,1}    |      1
    2 | {2,6}    |      1
@@ -237,9 +241,8 @@ vector (a test point) is classified by assigning the label which is most
 frequent among the k training samples nearest to that test point.
 In case of regression, average of the values of these k training samples
 is assigned to the test point.
-
-A commonly used distance metric for continuous variables is Euclidean distance.
-
+The only distance metric supported in this version is MADlib's squared_dist_norm2.
+Other distance metrics will be added in a future release of this module.
 
 
 @anchor literature
@@ -263,14 +266,10 @@ A commonly used distance metric for continuous variables is Euclidean distance.
 
 File knn.sql_in documenting the knn SQL functions
 
-
-
-
 @internal
 @sa namespace knn (documenting the implementation in Python)
 @endinternal
 */
-
 
 
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__knn_validate_src(
@@ -316,7 +315,7 @@ The output of the KNN module is a table with the following columns:
 
 id                  The ids of test data points.
 test_column_name    The test data points.
-predLabel           The output of KNN- label in case of classification, average value in case of regression.
+prediction          The output of KNN- label in case of classification, average value in case of regression.
 ';
     END IF;
 END;
@@ -363,6 +362,8 @@ DECLARE
     cur_pid integer;
     oldClientMinMessages VARCHAR;
     returnstring VARCHAR;
+    x_temp_table VARCHAR;
+    y_temp_table VARCHAR;
 BEGIN
     oldClientMinMessages :=
         (SELECT setting FROM pg_settings WHERE name = 'client_min_messages');
@@ -378,6 +379,8 @@ BEGIN
         RAISE EXCEPTION 'KNN error: The operation has to be r for regression OR c for classification.';
     END IF;
     PERFORM MADLIB_SCHEMA.create_schema_pg_temp();
+    x_temp_table := 'knn_'||md5('knn_'||now()::text||random()::text)||'_temp';
+    y_temp_table := 'knn_'||md5('knn_'||now()::text||random()::text)||'_temp';
 
     EXECUTE
 	$sql$
@@ -385,22 +388,31 @@ BEGIN
     IF (outputTableFlag != 0) THEN
 	RAISE Exception 'KNN error: Output table % already exists.', output_table;
     END IF;
-    
+
     EXECUTE
         $sql$
 	DROP TABLE IF EXISTS pg_temp.madlib_knn_interm;
 	CREATE TABLE pg_temp.madlib_knn_interm AS
-	select * from ( select row_number() over (partition by test_id order by dist) as r, x.* from (select test. $sql$ || id_column_name || $sql$ as test_id, madlib.squared_dist_norm2(train.$sql$ || point_column_name || $sql$,test.$sql$ || test_column_name || $sql$) as dist, $sql$ || label_column_name || $sql$ from $sql$ || textin(regclassout(point_source)) || $sql$ as train, $sql$ || textin(regclassout(test_source)) || $sql$ as test)x)y where y.r <= $sql$ || k;
+	SELECT *
+    FROM
+        (
+        SELECT row_number() over (partition by test_id order by dist) as r, $sql$ || x_temp_table || $sql$.*
+        FROM
+            (
+                SELECT test. $sql$ || id_column_name || $sql$ as test_id, MADLIB_SCHEMA.squared_dist_norm2(train.$sql$ || point_column_name || $sql$,test.$sql$ || test_column_name || $sql$) as dist, $sql$ || label_column_name || $sql$ from $sql$ || textin(regclassout(point_source)) || $sql$ AS train, $sql$ || textin(regclassout(test_source)) || $sql$ AS test
+            )$sql$ || x_temp_table || $sql$
+        )$sql$ || y_temp_table || $sql$
+    WHERE $sql$ || y_temp_table || $sql$.r <= $sql$ || k;
 	IF (operation = 'c') THEN
     	EXECUTE
         $sql$
 	CREATE TABLE $sql$ || output_table || $sql$ AS
-	select test_id as id, $sql$ || test_column_name || $sql$, mode() within group(order by $sql$ || label_column_name || $sql$) as predLabel from pg_temp.madlib_knn_interm join $sql$ || textin(regclassout(test_source)) || $sql$  on test_id=$sql$ || id_column_name || $sql$ group by test_id, $sql$ || test_column_name;
+    SELECT test_id as id, $sql$ || test_column_name || $sql$, MADLIB_SCHEMA.mode($sql$ || label_column_name || $sql$) as prediction from pg_temp.madlib_knn_interm join $sql$ || textin(regclassout(test_source)) || $sql$  on test_id=$sql$ || id_column_name || $sql$ group by test_id, $sql$ || test_column_name;
         ELSE
         EXECUTE
         $sql$
 	CREATE TABLE $sql$ || output_table || $sql$ AS
-        select test_id as id, $sql$ || test_column_name || $sql$ ,avg($sql$ || label_column_name || $sql$) as predLabel from pg_temp.madlib_knn_interm join $sql$ || textin(regclassout(test_source)) || $sql$  on test_id=$sql$ || id_column_name || $sql$ group by test_id, $sql$ || test_column_name || $sql$ order by test_id $sql$;
+        SELECT test_id as id, $sql$ || test_column_name || $sql$ ,avg($sql$ || label_column_name || $sql$) as prediction from pg_temp.madlib_knn_interm join $sql$ || textin(regclassout(test_source)) || $sql$  on test_id=$sql$ || id_column_name || $sql$ group by test_id, $sql$ || test_column_name || $sql$ order by test_id $sql$;
         END IF;
 
    EXECUTE 'SET client_min_messages TO ' || oldClientMinMessages;
