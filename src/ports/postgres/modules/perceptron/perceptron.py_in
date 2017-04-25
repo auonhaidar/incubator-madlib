@@ -27,33 +27,7 @@ version_wrapper = __mad_version()
 
 def __compute_perceptron(schema_madlib, rel_args, rel_state, rel_source,
                       dep_col, ind_col, col_grp_iteration, col_grp_state, **kwargs):
-    """
-    Compute logistic regression coefficients
-
-    This method serves as an interface to different optimization algorithms.
-    By default, iteratively reweighted least squares is used, but for data with
-    a lot of columns the conjugate-gradient method might perform better.
-
-    @param schema_madlib Name of the MADlib schema, properly escaped/quoted
-    @param rel_args Stores parameters that are needed by optimizers:
-                        max_iter and tolerance
-    @param rel_state Store the iteration states
-    @param rel_source Name of relation containing the training data
-    @param dep_col Name of dependent column in training data (of type BOOLEAN)
-    @param ind_col Name of independent column in training data (of type
-                   DOUBLE PRECISION[])
-    @param optimizer Name of the optimizer. 'newton' or 'irls': Iteratively
-                     reweighted least squares, 'cg': conjugate gradient or
-                     'igd': incremental gradient descent
-    @param grouping_col String of comma delimited group-by columns
-    @param grouping_str string of comma delimited group-by columns (casted)
-    @param kwargs We allow the caller to specify additional arguments (all of
-           which will be ignored though). The purpose of this is to allow the
-           caller to unpack a dictionary whose element set is a superset of
-           the required arguments by this function.
-
-    @return Number of iterations that has been run
-    """
+    
     optimizer = "igd"
     iterationCtrl = GroupIterationController(
         rel_args=rel_args,
@@ -97,24 +71,7 @@ def __compute_perceptron(schema_madlib, rel_args, rel_state, rel_source,
 
 def perceptron_train(schema_madlib, source_table, out_table, dependent_varname,
         independent_varname, max_iter=None, tolerance=None, **kwargs):
-    """
-    Train perceptron
-
-    @param schema_madlib Name of the MADlib schema, properly escaped/quoted
-    @param source_table Name of relation containing the training data
-    @param out_table Name of relation where model will be outputted
-    @param dependent_varname Name of dependent column in training data (of type BOOLEAN)
-    @param independent_varname Name of independent column in training data (of type
-                   DOUBLE PRECISION[])
-    @param max_iter The maximum number of iterations that are allowed.
-    @param tolerance The precision that the results should have
-    @param kwargs We allow the caller to specify additional arguments (all of
-           which will be ignored though). The purpose of this is to allow the
-           caller to unpack a dictionary whose element set is a superset of
-           the required arguments by this function.
-
-    @return A composite value which is __perceptron_result defined in perceptron.sql_in
-    """
+    
     grouping_cols=None
     optimizer="igd"
     verbose=None
@@ -385,29 +342,19 @@ SELECT {schema_madlib}.perceptron_train(
     source_table,         -- name of input table
     out_table,            -- name of output table
     dependent_varname,    -- name of dependent variable
-    independent_varname,  -- names of independent variables
-    grouping_cols,        -- optional, default NULL, names of columns to group-by
-    max_iter,             -- optional, default 20, maximum iteration number
-    optimizer,            -- optional, default 'irls', name of optimization method
+    independent_varname,  -- names of independent variables  
+    max_iter,             -- optional, default 20, maximum iteration number  
     tolerance,            -- optional, default 0.0001, the stopping threshold
-    verbose               -- optional, default FALSE, whether to print useful info
 );
 
 ------------------------------------------------------------------
                         OUTPUT
 ------------------------------------------------------------------
 The output table ('out_table' above) has the following columns:
-    <...>,                                          -- Grouping column values used during training
     'coef',                     double precision[], -- vector of fitting coefficients
     'log_likelihood',           double precision,   -- log likelihood
-    'std_err',                  double precision[], -- vector of standard errors of the fitting coefficients
-    'z_stats',                  double precision[], -- vector of the z-statistics of the coefficients
-    'p_values',                 double precision[], -- vector of the p values
-    'odds_ratios',              double precision[], -- vector of odds ratios, exp(coefficients)
-    'condition_no',             double precision,   -- the condition number
-    'num_rows_processed',       integer,            -- how many rows are actually used in the computation
-    'num_missing_rows_skipped', integer,            -- number of rows that contain NULL and were skipped per group
-    'num_iterations'            double precision    -- how many iterations are used in the computation per group
+    'num_iterations'            double precision    -- Maximum number of iterations of the perceptron algorithm that the user wants to run before stopping it
+    tolerance               —- Tolerance for the stopping criteria of the algorithm
 
 A summary table namedselect madlib.perceptron_train('andgate','andgatemod','t', 'ARRAY[1,x,y]',20); <out_table>_summary is also created at the same time, which has:
     'method'                    varchar,    -- modeling method name ('perceptron')
@@ -416,56 +363,52 @@ A summary table namedselect madlib.perceptron_train('andgate','andgatemod','t', 
     'dependent_varname'         varchar,    -- the dependent variable
     'independent_varname'       varchar,    -- the independent variable
     'optimizer_params'          varchar,    -- 'optimizer=..., max_iter=..., tolerance=...'
-    'num_all_groups'            integer,    -- how many groups
-    'num_failed_groups'         integer,    -- how many groups' fitting processes failed
-    'num_rows_processed'        integer,    -- total number of rows used in the computation
-    'num_missing_rows_skipped'  integer,    -- total number of rows skipped
-    'grouping_col'              varchar     -- grouping columns used in the regression
-        """
+    """
     elif message in ['example', 'examples']:
 
         help_string = """
-CREATE TABLE patients( id INTEGER NOT NULL,
-                       second_attack BOOLEAN,
-                       treatment INTEGER,
-                       trait_anxiety INTEGER);
-COPY patients FROM STDIN WITH DELIMITER '|';
-  1 |   True  |         1 |            70
-  3 |   True  |         1 |            50
-  5 |   True  |         0 |            40
-  7 |   True  |         0 |            75
-  9 |   True  |         0 |            70
- 11 |   False |         1 |            65
- 13 |   False |         1 |            45
- 15 |   False |         1 |            40
- 17 |   False |         0 |            55
- 19 |   False |         0 |            50
-  2 |   True  |         1 |            80
-  4 |   True  |         0 |            60
-  6 |   True  |         0 |            65
-  8 |   True  |         0 |            80
- 10 |   True  |         0 |            60
- 12 |   False |         1 |            50
- 14 |   False |         1 |            35
- 16 |   False |         1 |            50
- 18 |   False |         0 |            45
- 20 |   False |         0 |            60
+CREATE TABLE andgate( x INTEGER NOT NULL,
+                       y INTEGER NOT NULL,
+                       label INTEGER);
+COPY andgate FROM STDIN WITH DELIMITER '|';
+   1 | 1 | 1
+ 1 | 0 | 0
+ 0 | 1 | 0
+ 0 | 0 | 0
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 0 | 0
+ 0 | 0 | 0
+ 0 | 0 | 0
+ 0 | 0 | 0
+ 0 | 1 | 0
+ 1 | 1 | 0
+ 1 | 1 | 0
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
+ 1 | 1 | 1
 \.
 
 -- Drop output tables before calling the function
-DROP TABLE IF EXISTS patients_perceptron;
-DROP TABLE IF EXISTS patients_perceptron_summary;
+DROP TABLE IF EXISTS model;
+DROP TABLE IF EXISTS model_summary;
 
-SELECT madlib.perceptron_train( 'patients',
-                             'patients_perceptron',
-                             'second_attack',
-                             'ARRAY[1, treatment, trait_anxiety]',
-                             NULL,
-                             20,
-                             'irls'
+SELECT madlib.perceptron_train( 'andgate',
+                             'model',
+                             'label',
+                             'ARRAY[1, x, y]',
                            );
 
-SELECT * from patients_perceptron;
+SELECT * from model;
         """
     else:
         help_string = "No such option. Use {schema_madlib}.perceptron_train('help')"
@@ -475,13 +418,7 @@ SELECT * from patients_perceptron;
 
 
 def perceptron_predict_help(schema_madlib, message, **kwargs):
-    """ Help message for logistic regression prediction
-
-    @param message A string, the help message indicator
-
-    Returns:
-      A string, contains the help message
-    """
+    
     if not message:
         message = "summary"
     elif message.lower() in ['usage', 'help', '?']:
@@ -496,14 +433,8 @@ def perceptron_predict_help(schema_madlib, message, **kwargs):
 ----------------------------------------------------------------
                         SUMMARY
 ----------------------------------------------------------------
-Prediction for logistic regression can be used to obtain a prediction of the
-boolean value of the dependent variable given a value of independent variable.
+Prediction in Perceptron is done my Perceptron predict function.
 
-For more details on function usage:
-    SELECT {schema_madlib}.perceptron_predict('usage')
-
-For a small example on using the function:
-    SELECT {schema_madlib}.perceptron_predict('example')
         """
 
     help_string['usage'] = """
@@ -511,13 +442,11 @@ For a small example on using the function:
                         USAGE
 ------------------------------------------------------------------
 perceptron_predict(
-    coef,        -- DOUBLE PRECISION[], Coefficient of logistic regression model
+    coef,        -- DOUBLE PRECISION[], Learnt weights by Perceptron
     col_ind_var  -- DOUBLE PRECISION[], Values for the independent variables
 )
 
-The lengths of 'coef' array and 'col_ind_var' array above should be equal. For
-a small example on using the function:
-    SELECT {schema_madlib}.perceptron_predict('example')
+The lengths of 'coef' array and 'col_ind_var' array above should be equal.
 ------------------------------------------------------------------
                         OUTPUT
 ------------------------------------------------------------------
@@ -526,15 +455,7 @@ dependent variable value for the inputed independent variables.
         """
 
     help_string['example'] = """
-The tables below are obtained from the example in 'perceptron_train'.
-Details can be found by running "SELECT perceptron_train('examples');"
 
--- We compare the prediction with the actual value 'second_attack'
-SELECT id,
-       madlib.perceptron_predict(coef, ARRAY[1, treatment, trait_anxiety]) as pred_value,
-       second_attack as orig_value
-FROM patients p, patients_perceptron m
-ORDER BY id;
         """
 
     help_string['unknown'] = "No such option. Use {schema_madlib}.perceptron_predict()"
@@ -544,13 +465,7 @@ ORDER BY id;
 
 
 def perceptron_predict_prob_help(schema_madlib, message, **kwargs):
-    """ Help message for logistic regression probability prediction
-
-    @param message A string, the help message indicator
-
-    Returns:
-      A string, contains the help message
-    """
+    
     if not message or message == 'summary':
         message = "summary"
     elif message.lower() in ['usage', 'help', '?']:
@@ -566,28 +481,20 @@ def perceptron_predict_prob_help(schema_madlib, message, **kwargs):
                         SUMMARY
 ----------------------------------------------------------------
 This function can be used to obtain a prediction of the probability of
-the dependent variable in a logistic regression model given the value of
+the dependent variable in Perceptron given the value of
 independent variables.
-
-For more details on function usage:
-    SELECT {schema_madlib}.perceptron_predict_prob('usage')
-
-For a small example on using the function:
-    SELECT {schema_madlib}.perceptron_predict_prob('example')
-        """
+"""
 
     help_string['usage'] = """
 ------------------------------------------------------------------
                         USAGE
 ------------------------------------------------------------------
 perceptron_predict_prob(
-    coef,        -- DOUBLE PRECISION[], Coefficient of logistic regression model
+    coef,        -- DOUBLE PRECISION[], Learnt weights of Perceptron
     col_ind_var  -- DOUBLE PRECISION[], Values for the independent variables
 )
 
-The lengths of 'coef' array and 'col_ind_var' array above should be equal. For
-a small example on using the function:
-    SELECT {schema_madlib}.perceptron_predict_prob('example')
+The lengths of 'coef' array and 'col_ind_var' array above should be equal.
 ------------------------------------------------------------------
                         OUTPUT
 ------------------------------------------------------------------
@@ -597,13 +504,6 @@ independent variable values.
         """
 
     help_string['example'] = """
--- The tables below are obtained from the example in 'perceptron_train'.
--- Details can be found by running "SELECT perceptron_train('examples');"
-
-SELECT id,
-       madlib.perceptron_predict_prob(coef, ARRAY[1, treatment, trait_anxiety]) as pred_prob
-FROM patients p, patients_perceptron m
-ORDER BY id;
         """
 
     help_string['unknown'] = "No such option. Use {schema_madlib}.perceptron_predict_prob()"

@@ -26,37 +26,15 @@ using dbal::NoSolutionFoundException;
 
 namespace perceptron {
 
-// FIXME this enum should be accessed by all modules that may need grouping
-// valid status values
 enum { IN_PROCESS, COMPLETED, TERMINATED, NULL_EMPTY };
 
-// Internal functions
+
 AnyType stateToResult(const Allocator &inAllocator,
                       const HandleMap<const ColumnVector, TransparentHandle<double> >& inCoef,
                       const Matrix & hessian,
                       const double &logLikelihood,
                       int status,
                       const uint64_t &numRows);
-
-
-// ---------------------------------------------------------------------------
-//              Perceptron States
-// ---------------------------------------------------------------------------
-
-/**
- * @brief Inter- and intra-iteration state for conjugate-gradient method for
- *        perceptron
- *
- * TransitionState encapsualtes the transition state during the
- * logistic-regression aggregate function. To the database, the state is
- * exposed as a single DOUBLE PRECISION array, to the C++ code it is a proper
- * object containing scalars and vectors.
- *
- * Note: We assume that the DOUBLE PRECISION array is initialized by the
- * database with length at least 5, and all elemenets are 0.
- *
- */
-
 
 
 /**
@@ -66,21 +44,22 @@ inline double sigma(double x) {
     return 1. / (1. + std::exp(-x));
 }
 
-
-
+/**
+ * @brief TANH
+ */
+inline double tanh(double x) {
+    return (std::exp(x) - std::exp(-x)) / (std::exp(x) + std::exp(-x));
+}
 
 /**
- * @brief Inter- and intra-iteration state for incremental gradient
- *        method for logistic regression
- *
- * TransitionState encapsualtes the transition state during the
- * logistic-regression aggregate function. To the database, the state is
- * exposed as a single DOUBLE PRECISION array, to the C++ code it is a proper
- * object containing scalars, a vector, and a matrix.
- *
- * Note: We assume that the DOUBLE PRECISION array is initialized by the
- * database with length at least 4, and all elemenets are 0.
+ * @brief ReLU: softplus
  */
+inline double relu(double x) {
+    return std::log(1.0 + std::exp(x));
+}
+
+
+
 template <class Handle>
 class PerceptronIGDTransitionState {
     template <class OtherHandle>
@@ -93,21 +72,12 @@ class PerceptronIGDTransitionState {
         rebind(static_cast<uint16_t>(mStorage[0]));
     }
 
-    /**
-     * @brief Convert to backend representation
-     *
-     * We define this function so that we can use State in the
-     * argument list and as a return type.
-     */
+    
     inline operator AnyType() const {
         return mStorage;
     }
 
-    /**
-     * @brief Initialize the conjugate-gradient state.
-     *
-     * This function is only called for the first iteration, for the first row.
-     */
+    
     inline void initialize(const Allocator &inAllocator, uint16_t inWidthOfX) {
         mStorage = inAllocator.allocateArray<double, dbal::AggregateContext,
                                              dbal::DoZero, dbal::ThrowBadAlloc>(arraySize(inWidthOfX));
@@ -115,9 +85,7 @@ class PerceptronIGDTransitionState {
         widthOfX = inWidthOfX;
     }
 
-    /**
-     * @brief We need to support assigning the previous state
-     */
+    
     template <class OtherHandle>
     PerceptronIGDTransitionState &operator=(
         const PerceptronIGDTransitionState<OtherHandle> &inOtherState) {
@@ -127,10 +95,7 @@ class PerceptronIGDTransitionState {
         return *this;
     }
 
-    /**
-     * @brief Merge with another State object by copying the intra-iteration
-     *     fields
-     */
+    
     template <class OtherHandle>
     PerceptronIGDTransitionState &operator+=(
         const PerceptronIGDTransitionState<OtherHandle> &inOtherState) {
@@ -140,12 +105,7 @@ class PerceptronIGDTransitionState {
             throw std::logic_error("Internal error: Incompatible transition "
                                    "states");
 
-        // Compute the average of the models. Note: The following remains an
-        // invariant, also after more than one merge:
-        // The model is a linear combination of the per-segment models
-        // where the coefficient (weight) for each per-segment model is the
-        // ratio "# rows in segment / total # rows of all segments merged so
-        // far".
+        
         double totalNumRows = static_cast<double>(numRows)
             + static_cast<double>(inOtherState.numRows);
         coef = double(numRows) / totalNumRows * coef
@@ -154,17 +114,12 @@ class PerceptronIGDTransitionState {
         numRows += inOtherState.numRows;
         X_transp_AX += inOtherState.X_transp_AX;
         logLikelihood += inOtherState.logLikelihood;
-        // merged state should have the higher status
-        // (see top of file for more on 'status' )
         status = (inOtherState.status == TERMINATED) ? inOtherState.status : status;
         return *this;
     }
 
-    /**
-     * @brief Reset the inter-iteration fields.
-     */
+    
     inline void reset() {
-        // FIXME: HAYING: stepsize is hard-coded here now
         stepsize = .01;
         numRows = 0;
         X_transp_AX.fill(0);
@@ -176,22 +131,7 @@ class PerceptronIGDTransitionState {
     static inline uint32_t arraySize(const uint16_t inWidthOfX) {
         return 5 + inWidthOfX * inWidthOfX + inWidthOfX;
     }
-    /**
-     * @brief Rebind to a new storage array
-     *
-     * @param inWidthOfX The number of independent variables.
-     *
-     * Array layout (iteration refers to one aggregate-function call):
-     * Inter-iteration components (updated in final function):
-     * - 0: widthOfX (number of coefficients)
-     * - 1: stepsize (step size of gradient steps)
-     * - 2: coef (vector of coefficients)
-     *
-     * Intra-iteration components (updated in transition step):
-     * - 2 + widthOfX: numRows (number of rows already processed in this iteration)
-     * - 3 + widthOfX: X_transp_AX (X^T A X)
-     * - 3 + widthOfX * widthOfX + widthOfX: logLikelihood ( ln(l(c)) )
-     */
+    
     void rebind(uint16_t inWidthOfX) {
         widthOfX.rebind(&mStorage[0]);
         stepsize.rebind(&mStorage[1]);
@@ -229,10 +169,7 @@ perceptron_igd_step_transition::run(AnyType &args) {
     } catch (const ArrayWithNullException &e) {
         return args[0];
     }
-
-    // The following check was added with MADLIB-138.
     if (!x.is_finite()){
-        //throw std::domain_error("Design matrix is not finite.");
         warning("Design matrix is not finite.");
         state.status = TERMINATED;
         return state;
@@ -242,8 +179,6 @@ perceptron_igd_step_transition::run(AnyType &args) {
     // row.
     if (state.numRows == 0) {
         if (x.size() > std::numeric_limits<uint16_t>::max()){
-            //throw std::domain_error(
-            //    "Number of independent variables cannot be larger than 65535.");
             warning("Number of independent variables cannot be larger than 65535.");
             state.status = TERMINATED;
             return state;
@@ -285,9 +220,6 @@ perceptron_igd_step_transition::run(AnyType &args) {
     return state;
 }
 
-/**
- * @brief Perform the perliminary aggregation function: Merge transition states
- */
 AnyType
 perceptron_igd_step_merge_states::run(AnyType &args) {
     PerceptronIGDTransitionState<MutableArrayHandle<double> > stateLeft = args[0];
@@ -305,20 +237,12 @@ perceptron_igd_step_merge_states::run(AnyType &args) {
     return stateLeft;
 }
 
-/**
- * @brief Perform the logistic-regression final step
- *
- * All that we do here is to test whether we have seen any data. If not, we
- * return NULL. Otherwise, we return the transition state unaltered.
- */
+
 AnyType
 perceptron_igd_step_final::run(AnyType &args) {
     PerceptronIGDTransitionState<MutableArrayHandle<double> > state = args[0];
 
     if(!state.coef.is_finite()){
-        //throw NoSolutionFoundException(
-        //    "Overflow or underflow in incremental-gradient iteration. Input "
-        //    "data is likely of poor numerical condition.");
         warning("Overflow or underflow in incremental-gradient iteration. Input"
               "data is likely of poor numerical condition.");
         state.status = TERMINATED;
@@ -368,12 +292,7 @@ internal_perceptron_igd_result::run(AnyType &args) {
                          state.status, state.numRows);
 }
 
-/**
- * @brief Compute the diagnostic statistics
- *
- * This function wraps the common parts of computing the results for both the
- * CG and the IRLS method.
- */
+
 AnyType stateToResult(
     const Allocator &inAllocator,
     const HandleMap<const ColumnVector, TransparentHandle<double> > &inCoef,
@@ -405,7 +324,7 @@ AnyType stateToResult(
         oddsRatios(i) = std::exp( inCoef(i) );
     }
 
-    // Return all coefficients, standard errors, etc. in a tuple
+    
     AnyType tuple;
     tuple << inCoef << logLikelihood << stdErr << waldZStats << waldPValues
           << oddsRatios << inverse_of_X_transp_AX
@@ -413,22 +332,7 @@ AnyType stateToResult(
     return tuple;
 }
 
-// ---------------------------------------------------------------------------
-//             Robust Logistic Regression States
-// ---------------------------------------------------------------------------
-/**
- * @brief Inter-and intra-iteration state for robust variance calculation for
- *        logistic regression
- *
- * TransitionState encapsualtes the transition state during the
- * logistic-regression aggregate function. To the database, the state is
- * exposed as a single DOUBLE PRECISION array, to the C++ code it is a proper
- * object containing scalars and vectors.
- *
- * Note: We assume that the DOUBLE PRECISION array is initialized by the
- * database with length at least 5, and all elemenets are 0.
- *
- */
+
 template <class Handle>
 class RobustPerceptronTransitionState {
     template <class OtherHandle>
@@ -441,21 +345,12 @@ class RobustPerceptronTransitionState {
         rebind(static_cast<uint16_t>(mStorage[1]));
     }
 
-    /**
-     * @brief Convert to backend representation
-     *
-     * We define this function so that we can use State in the
-     * argument list and as a return type.
-     */
+    
     inline operator AnyType() const {
         return mStorage;
     }
 
-    /**
-     * @brief Initialize the robust variance calculation state.
-     *
-     * This function is only called for the first iteration, for the first row.
-     */
+    
     inline void initialize(const Allocator &inAllocator, uint16_t inWidthOfX) {
         mStorage = inAllocator.allocateArray<double, dbal::AggregateContext,
                                              dbal::DoZero, dbal::ThrowBadAlloc>(arraySize(inWidthOfX));
@@ -463,9 +358,7 @@ class RobustPerceptronTransitionState {
         widthOfX = inWidthOfX;
     }
 
-    /**
-     * @brief We need to support assigning the previous state
-     */
+    
     template <class OtherHandle>
     RobustPerceptronTransitionState &operator=(
         const RobustPerceptronTransitionState<OtherHandle> &inOtherState) {
@@ -475,10 +368,7 @@ class RobustPerceptronTransitionState {
         return *this;
     }
 
-    /**
-     * @brief Merge with another State object by copying the intra-iteration
-     *     fields
-     */
+    
     template <class OtherHandle>
     RobustPerceptronTransitionState &operator+=(
         const RobustPerceptronTransitionState<OtherHandle> &inOtherState) {
@@ -494,9 +384,7 @@ class RobustPerceptronTransitionState {
         return *this;
     }
 
-    /**
-     * @brief Reset the inter-iteration fields.
-     */
+    
     inline void reset() {
         numRows = 0;
         X_transp_AX.fill(0);
@@ -509,23 +397,7 @@ class RobustPerceptronTransitionState {
         return 4 + 2 * inWidthOfX * inWidthOfX + inWidthOfX;
     }
 
-    /**
-     * @brief Rebind to a new storage array
-     *
-     * @param inWidthOfX The number of independent variables.
-     *
-     * Array layout (variables that are constant throughout function call):
-     * Inter-iteration components
-     * - 0: Iteration (What iteration is this)
-     * - 1: widthOfX (number of coefficients)
-     * - 2: coef (vector of coefficients)
-     *
-     * Intra-iteration components (variables that updated in transition step):
-     * - 2 + widthOfX: numRows (number of rows already processed in this iteration)
-     * - 3 + widthOfX: X_transp_AX (X^T A X)
-     * - 3 + widthOfX * widthOfX + widthOfX: meat (the meat matrix)
-     * - 3 + 2 * widthOfX * widthOfX + widthOfX: grad (intermediate value for gradient)
-     */
+    
     void rebind(uint16_t inWidthOfX) {
         iteration.rebind(&mStorage[0]);
         widthOfX.rebind(&mStorage[1]);
@@ -548,10 +420,6 @@ class RobustPerceptronTransitionState {
 };
 
 
-
-/**
- * @brief Helper function that computes the final statistics for the robust variance
- */
 
 AnyType robuststateToResult(
     const Allocator &inAllocator,
@@ -581,20 +449,14 @@ AnyType robuststateToResult(
             prob::normal(), -std::abs(waldZStats(i)));
     }
 
-    // Return all coefficients, standard errors, etc. in a tuple
     AnyType tuple;
-    //tuple <<  variance<<stdErr << waldZStats << waldPValues;
     tuple <<  coef<<stdErr << waldZStats << waldPValues;
     return tuple;
 }
 
-/**
- * @brief Perform the logistic-regression transition step
- */
+
 AnyType
 robust_perceptron_step_transition::run(AnyType &args) {
-    // Early return because of an exception has been "thrown"
-    // (actually "warning") in the previous invocations
     if(args[0].isNull())
         return Null();
     RobustPerceptronTransitionState<MutableArrayHandle<double> > state = args[0];
@@ -602,26 +464,21 @@ robust_perceptron_step_transition::run(AnyType &args) {
     double y = args[1].getAs<bool>() ? 1. : -1.;
     MappedColumnVector x;
     try {
-        // an exception is raised in the backend if args[2] contains nulls
         MappedColumnVector xx = args[2].getAs<MappedColumnVector>();
-        // x is a const reference, we can only rebind to change its pointer
         x.rebind(xx.memoryHandle(), xx.size());
     } catch (const ArrayWithNullException &e) {
         return args[0];
     }
     MappedColumnVector coef = args[3].getAs<MappedColumnVector>();
 
-    // The following check was added with MADLIB-138.
     if (!dbal::eigen_integration::isfinite(x)) {
-        //throw std::domain_error("Design matrix is not finite.");
         warning("Design matrix is not finite.");
         return Null();
     }
 
     if (state.numRows == 0) {
         if (x.size() > std::numeric_limits<uint16_t>::max()) {
-            //throw std::domain_error("Number of independent variables cannot be "
-            //                        "larger than 65535.");
+            
             warning("Number of independent variables cannot be larger than 65535.");
             return Null();
         }
@@ -648,89 +505,47 @@ robust_perceptron_step_transition::run(AnyType &args) {
 }
 
 
-/**
- * @brief Perform the perliminary aggregation function: Merge transition states
- */
 AnyType
 robust_perceptron_step_merge_states::run(AnyType &args) {
-    // In case the aggregator should be terminated because
-    // an exception has been "thrown" in the transition function
     if(args[0].isNull() || args[1].isNull())
         return Null();
 
     RobustPerceptronTransitionState<MutableArrayHandle<double> > stateLeft = args[0];
     RobustPerceptronTransitionState<ArrayHandle<double> > stateRight = args[1];
-    // We first handle the trivial case where this function is called with one
-    // of the states being the initial state
     if (stateLeft.numRows == 0)
         return stateRight;
     else if (stateRight.numRows == 0)
         return stateLeft;
 
-    // Merge states together and return
     stateLeft += stateRight;
     return stateLeft;
 }
 
-/**
- * @brief Perform the robust variance calculation for logistic-regression final step
- */
+
 AnyType
 robust_perceptron_step_final::run(AnyType &args) {
-    // In case the aggregator should be terminated because
-    // an exception has been "thrown" in the transition function
     if (args[0].isNull())
         return Null();
-    // We request a mutable object. Depending on the backend, this might perform
-    // a deep copy.
     RobustPerceptronTransitionState<MutableArrayHandle<double> > state = args[0];
-    // Aggregates that haven't seen any data just return Null.
     if (state.numRows == 0)
         return Null();
 
-    //Compute the robust variance with the White sandwich estimator
     SymmetricPositiveDefiniteEigenDecomposition<Matrix> decomposition(
         state.X_transp_AX, EigenvaluesOnly, ComputePseudoInverse);
 
     Matrix bread = decomposition.pseudoInverse();
 
-    /*
-      This is written a little strangely because it prevents Eigen warnings.
-      The following two lines are equivalent to:
-      Matrix variance = bread*state.meat*bread;
-      but eigen throws a warning on that.
-    */
+    
     Matrix varianceMat;// = meat;
     varianceMat = bread*state.meat*bread;
 
-    /*
-     * Computing the results for robust variance
-     */
+    
 
     return robuststateToResult(*this, state.coef,
                                varianceMat.diagonal());
 }
 
-// ------------------------ End of Robust ------------------------------------
 
-
-
-
-// ---------------------------------------------------------------------------
-//             Marginal Effects Logistic Regression States
-// ---------------------------------------------------------------------------
-/**
- * @brief State for marginal effects calculation for logistic regression
- *
- * TransitionState encapsualtes the transition state during the
- * marginal effects calculation for the logistic-regression aggregate function.
- * To the database, the state is exposed as a single DOUBLE PRECISION array,
- * to the C++ code it is a proper object containing scalars and vectors.
- *
- * Note: We assume that the DOUBLE PRECISION array is initialized by the
- * database with length at least 5, and all elemenets are 0.
- *
- */
 template <class Handle>
 class MarginalPerceptronTransitionState {
     template <class OtherHandle>
@@ -743,21 +558,12 @@ class MarginalPerceptronTransitionState {
         rebind(static_cast<uint16_t>(mStorage[1]));
     }
 
-    /**
-     * @brief Convert to backend representation
-     *
-     * We define this function so that we can use State in the
-     * argument list and as a return type.
-     */
+    
     inline operator AnyType() const {
         return mStorage;
     }
 
-    /**
-     * @brief Initialize the marginal variance calculation state.
-     *
-     * This function is only called for the first iteration, for the first row.
-     */
+    
     inline void initialize(const Allocator &inAllocator, uint16_t inWidthOfX) {
         mStorage = inAllocator.allocateArray<double, dbal::AggregateContext,
                                              dbal::DoZero, dbal::ThrowBadAlloc>(arraySize(inWidthOfX));
@@ -765,9 +571,7 @@ class MarginalPerceptronTransitionState {
         widthOfX = inWidthOfX;
     }
 
-    /**
-     * @brief We need to support assigning the previous state
-     */
+    
     template <class OtherHandle>
     MarginalPerceptronTransitionState &operator=(
         const MarginalPerceptronTransitionState<OtherHandle> &inOtherState) {
@@ -777,10 +581,7 @@ class MarginalPerceptronTransitionState {
         return *this;
     }
 
-    /**
-     * @brief Merge with another State object by copying the intra-iteration
-     *     fields
-     */
+    
     template <class OtherHandle>
     MarginalPerceptronTransitionState &operator+=(
         const MarginalPerceptronTransitionState<OtherHandle> &inOtherState) {
@@ -798,9 +599,7 @@ class MarginalPerceptronTransitionState {
         return *this;
     }
 
-    /**
-     * @brief Reset the inter-iteration fields.
-     */
+   
     inline void reset() {
         numRows = 0;
         marginal_effects_per_observation = 0;
@@ -814,21 +613,7 @@ class MarginalPerceptronTransitionState {
         return 4 + 2 * inWidthOfX * inWidthOfX + 2 * inWidthOfX;
     }
 
-    /**
-     * @brief Rebind to a new storage array
-     *
-     * @param inWidthOfX The number of independent variables.
-     *
-     * Array layout (variables that are constant throughout function call):
-     * Inter-iteration components
-     * - 0: Iteration (What iteration is this)
-     * - 1: widthOfX (number of coefficients)
-     * - 2: coef (vector of coefficients)
-     *
-     * Intra-iteration components (variables that updated in transition step):
-     * - 2 + widthOfX: numRows (number of rows already processed in this iteration)
-     * - 3 + widthOfX: X_transp_AX (X^T A X)
-     */
+    
     void rebind(uint16_t inWidthOfX) {
         iteration.rebind(&mStorage[0]);
         widthOfX.rebind(&mStorage[1]);
@@ -854,11 +639,7 @@ class MarginalPerceptronTransitionState {
     typename HandleTraits<Handle>::MatrixTransparentHandleMap delta;
 };
 
-// ----------------------------------------------------------------------
 
-/**
- * @brief Helper function that computes the final statistics for the marginal variance
- */
 
 AnyType marginalstateToResult(
     const Allocator &inAllocator,
@@ -884,14 +665,11 @@ AnyType marginalstateToResult(
         stdErr(i) = std::sqrt(diagonal_of_variance_matrix(i));
         tStats(i) = marginal_effects(i) / stdErr(i);
 
-        // P-values only make sense if numRows > coef.size()
         if (numRows > inCoef.size())
             pValues(i) = 2. * prob::cdf(
                 prob::normal(), -std::abs(tStats(i)));
     }
 
-    // Return all coefficients, standard errors, etc. in a tuple
-    // Note: PValues will return NULL if numRows <= coef.size
     AnyType tuple;
     tuple << marginal_effects
           << coef
@@ -902,40 +680,28 @@ AnyType marginalstateToResult(
 }
 
 
-/**
- * @brief Perform the marginal effects transition step
- */
 AnyType
 marginal_perceptron_step_transition::run(AnyType &args) {
-    // Early return because of an exception has been "thrown"
-    // (actually "warning") in the previous invocations
     if (args[0].isNull())
         return Null();
     MarginalPerceptronTransitionState<MutableArrayHandle<double> > state = args[0];
     if (args[1].isNull() || args[2].isNull()) { return args[0]; }
     MappedColumnVector x;
     try {
-        // an exception is raised in the backend if args[2] contains nulls
         MappedColumnVector xx = args[2].getAs<MappedColumnVector>();
-        // x is a const reference, we can only rebind to change its pointer
         x.rebind(xx.memoryHandle(), xx.size());
     } catch (const ArrayWithNullException &e) {
         return args[0];
     }
 
     MappedColumnVector coef = args[3].getAs<MappedColumnVector>();
-
-    // The following check was added with MADLIB-138.
     if (!dbal::eigen_integration::isfinite(x)) {
-        //throw std::domain_error("Design matrix is not finite.");
         warning("Design matrix is not finite.");
         return Null();
     }
 
     if (state.numRows == 0) {
         if (x.size() > std::numeric_limits<uint16_t>::max()) {
-            //throw std::domain_error("Number of independent variables cannot be "
-            //                        "larger than 65535.");
             warning("Number of independent variables cannot be larger than 65535.");
             return Null();
         }
@@ -968,26 +734,19 @@ marginal_perceptron_step_transition::run(AnyType &args) {
 }
 
 
-/**
- * @brief Marginal effects: Merge transition states
- */
+
 AnyType
 marginal_perceptron_step_merge_states::run(AnyType &args) {
-    // In case the aggregator should be terminated because
-    // an exception has been "thrown" in the transition function
     if(args[0].isNull() || args[1].isNull())
         return Null();
 
     MarginalPerceptronTransitionState<MutableArrayHandle<double> > stateLeft = args[0];
     MarginalPerceptronTransitionState<ArrayHandle<double> > stateRight = args[1];
-    // We first handle the trivial case where this function is called with one
-    // of the states being the initial state
     if (stateLeft.numRows == 0)
         return stateRight;
     else if (stateRight.numRows == 0)
         return stateLeft;
 
-    // Merge states together and return
     stateLeft += stateRight;
     return stateLeft;
 }
@@ -997,27 +756,19 @@ marginal_perceptron_step_merge_states::run(AnyType &args) {
  */
 AnyType
 marginal_perceptron_step_final::run(AnyType &args) {
-    // In case the aggregator should be terminated because
-    // an exception has been "thrown" in the transition function
     if (args[0].isNull())
         return Null();
 
-    // We request a mutable object.
-    // Depending on the backend, this might perform a deep copy.
     MarginalPerceptronTransitionState<MutableArrayHandle<double> > state = args[0];
-    // Aggregates that haven't seen any data just return Null.
     if (state.numRows == 0)
         return Null();
 
-    // Compute variance matrix of logistic regression
     SymmetricPositiveDefiniteEigenDecomposition<Matrix> decomposition(
         state.X_transp_AX, EigenvaluesOnly, ComputePseudoInverse);
     Matrix variance = decomposition.pseudoInverse();
-    // Standard error according to the delta method
     Matrix std_err;
     std_err = state.delta * variance * trans(state.delta) / static_cast<double>(state.numRows*state.numRows);
 
-    // Computing the marginal effects
     return marginalstateToResult(*this,
                                  state.coef,
                                  std_err.diagonal(),
@@ -1025,7 +776,7 @@ marginal_perceptron_step_final::run(AnyType &args) {
                                  static_cast<double>(state.numRows));
 }
 
-// ------------------------ End of Marginal ------------------------------------
+
 
 AnyType perceptron_predict::run(AnyType &args) {
     try {
@@ -1035,7 +786,6 @@ AnyType perceptron_predict::run(AnyType &args) {
             "Perceptron error: the coefficients contain NULL values");
     }
 
-    // returns NULL if args[1] (features) contains NULL values
     try {
         args[1].getAs<MappedColumnVector>();
     } catch (const ArrayWithNullException &e) {
@@ -1060,7 +810,6 @@ AnyType perceptron_predict_prob::run(AnyType &args) {
             "Perceptron error: the coefficients contain NULL values");
     }
 
-    // returns NULL if args[1] (features) contains NULL values
     try {
         args[1].getAs<MappedColumnVector>();
     } catch (const ArrayWithNullException &e) {
@@ -1076,7 +825,6 @@ AnyType perceptron_predict_prob::run(AnyType &args) {
 
     double dot = vec1.dot(vec2);
     double logit = 0.0;
-    // Underflow/overfolow handling
     try {
         logit = 1.0 / (1 + exp(-dot));
     } catch (...) {
@@ -1085,6 +833,6 @@ AnyType perceptron_predict_prob::run(AnyType &args) {
     return logit;
 }
 
-} // namespace perceptron
-} // namespace modules
-} // namespace madlib
+}
+}
+}
