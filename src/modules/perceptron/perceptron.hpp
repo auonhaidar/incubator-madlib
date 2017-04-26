@@ -68,3 +68,53 @@ DECLARE_UDF(perceptron, marginal_perceptron_step_final)
  */
 DECLARE_UDF(perceptron, perceptron_predict)
 DECLARE_UDF(perceptron, perceptron_predict_prob)
+DECLARE_UDF(perceptron, perceptron_predict_prob_tanh)
+
+DECLARE_UDF(perceptron, sigmoid_igd_step_transition)
+
+/**
+ * @brief perceptron (incremetal-gradient step): State merge function
+ */
+DECLARE_UDF(perceptron, sigmoid_igd_step_merge_states)
+
+/**
+ * @brief perceptron (incremetal-gradient step): Final function
+ */
+DECLARE_UDF(perceptron, sigmoid_igd_step_final)
+
+/**
+ * @brief perceptron (incremetal-gradient step): Difference in
+ *     log-likelihood between two transition states
+ */
+DECLARE_UDF(perceptron, internal_sigmoid_igd_step_distance)
+
+/**
+ * @brief perceptron (iteratively-reweighted-lest-squares step):
+ *     Convert transition state to result tuple
+ */
+DECLARE_UDF(perceptron, internal_sigmoid_igd_result)
+
+
+DECLARE_UDF(perceptron, tanh_igd_step_transition)
+
+/**
+ * @brief perceptron (incremetal-gradient step): State merge function
+ */
+DECLARE_UDF(perceptron, tanh_igd_step_merge_states)
+
+/**
+ * @brief perceptron (incremetal-gradient step): Final function
+ */
+DECLARE_UDF(perceptron, tanh_igd_step_final)
+
+/**
+ * @brief perceptron (incremetal-gradient step): Difference in
+ *     log-likelihood between two transition states
+ */
+DECLARE_UDF(perceptron, internal_tanh_igd_step_distance)
+
+/**
+ * @brief perceptron (iteratively-reweighted-lest-squares step):
+ *     Convert transition state to result tuple
+ */
+DECLARE_UDF(perceptron, internal_tanh_igd_result)

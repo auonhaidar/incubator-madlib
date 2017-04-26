@@ -25,10 +25,9 @@ version_wrapper = __mad_version()
 # ========================================================================
 
 
-def __compute_perceptron(schema_madlib, rel_args, rel_state, rel_source,
-                      dep_col, ind_col, col_grp_iteration, col_grp_state, **kwargs):
+def __compute_perceptron(schema_madlib, rel_args, rel_state, rel_source, dep_col, ind_col, optimizer, col_grp_iteration, col_grp_state, **kwargs):
     
-    optimizer = "igd"
+    #optimizer = "igd"
     iterationCtrl = GroupIterationController(
         rel_args=rel_args,
         rel_state=rel_state,
@@ -44,50 +43,95 @@ def __compute_perceptron(schema_madlib, rel_args, rel_state, rel_source,
         col_grp_iteration=col_grp_iteration,
         col_grp_state=col_grp_state)
 
-    with iterationCtrl as it:
-        it.iteration = 0
-        while True:
-            it.update(
-                """
-                {schema_madlib}.__perceptron_{optimizer}_step(
-                    ({dep_col})::boolean,
-                    ({ind_col})::double precision[],
-                    rel_state.{col_grp_state})
-                """)
-            if it.test(
+    if optimizer == "igd":
+        with iterationCtrl as it:
+            it.iteration = 0
+            while True:
+                it.update(
                     """
-                    {iteration} >= _args.max_iter
-                    or
-                    _state_current[array_upper(_state_current, 1)] = 3
-                    or
-                    {schema_madlib}.__perceptron_{optimizer}_step_distance(
-                        _state_previous, _state_current) < _args.tolerance
-                    """):
-                break
+                    {schema_madlib}.__perceptron_{optimizer}_step(
+                        ({dep_col})::boolean,
+                        ({ind_col})::double precision[],
+                        rel_state.{col_grp_state})
+                    """)
+                if it.test(
+                        """
+                        {iteration} >= _args.max_iter
+                        or
+                        _state_current[array_upper(_state_current, 1)] = 3
+                        or
+                        {schema_madlib}.__perceptron_{optimizer}_step_distance(
+                            _state_previous, _state_current) < _args.tolerance
+                        """):
+                    break
+    if optimizer == "sigmoid":
+        with iterationCtrl as it:
+            it.iteration = 0
+            while True:
+                it.update(
+                    """
+                    {schema_madlib}.__sigmoid_igd_step(
+                        ({dep_col})::boolean,
+                        ({ind_col})::double precision[],
+                        rel_state.{col_grp_state})
+                    """)
+                if it.test(
+                        """
+                        {iteration} >= _args.max_iter
+                        or
+                        _state_current[array_upper(_state_current, 1)] = 3
+                        or
+                        {schema_madlib}.__sigmoid_igd_step_distance(
+                            _state_previous, _state_current) < _args.tolerance
+                        """):
+                    break
+    if optimizer == "tanh":
+        with iterationCtrl as it:
+            it.iteration = 0
+            while True:
+                it.update(
+                    """
+                    {schema_madlib}.__tanh_igd_step(
+                        ({dep_col})::boolean,
+                        ({ind_col})::double precision[],
+                        rel_state.{col_grp_state})
+                    """)
+                if it.test(
+                        """
+                        {iteration} >= _args.max_iter
+                        or
+                        _state_current[array_upper(_state_current, 1)] = 3
+                        or
+                        {schema_madlib}.__tanh_igd_step_distance(
+                            _state_previous, _state_current) < _args.tolerance
+                        """):
+                    break
     return iterationCtrl.iteration
 
 # ========================================================================
 
 
-def perceptron_train(schema_madlib, source_table, out_table, dependent_varname,
-        independent_varname, max_iter=None, tolerance=None, **kwargs):
-    
+def perceptron_train(schema_madlib, source_table, out_table, dependent_varname, independent_varname, errorfn, actfn, max_iter, tolerance, **kwargs):
+    #tolerance = 0.000001
     grouping_cols=None
-    optimizer="igd"
+    optimizer = actfn
+    if errorfn == "loglik":
+        optimizer="igd"
+
+    
     verbose=None
     __perceptron_validate_args(
         schema_madlib, source_table, out_table, dependent_varname,
-        independent_varname, max_iter, tolerance)
+        independent_varname, optimizer, max_iter, tolerance)
 
     return __perceptron_train_compute(
         schema_madlib, source_table, out_table, dependent_varname,
-        independent_varname, max_iter, tolerance, **kwargs)
+        independent_varname, optimizer, max_iter, tolerance, **kwargs)
 
 # ========================================================================
 
 
-def __perceptron_validate_args(schema_madlib, tbl_source, tbl_output, dep_col,
-                            ind_col, max_iter, tolerance):
+def __perceptron_validate_args(schema_madlib, tbl_source, tbl_output, dep_col, ind_col, optimizer, max_iter, tolerance):
     """
     Validate the arguments
     """
@@ -107,6 +151,9 @@ def __perceptron_validate_args(schema_madlib, tbl_source, tbl_output, dep_col,
     if not dep_col or dep_col.strip().lower() in ('null', ''):
         plpy.error("perceptron error: Invalid dependent column name!")
 
+    if optimizer not in ("igd", "sigmoid", "tanh"):
+        plpy.error("perceptron error: Invalid activation function!")        
+
     # if not columns_exist_in_table(tbl_source, [dep_col]):
     #     plpy.error("perceptron error: Dependent column does not exist!")
 
@@ -123,8 +170,7 @@ def __perceptron_validate_args(schema_madlib, tbl_source, tbl_output, dep_col,
 # ========================================================================
 
 
-def __perceptron_train_compute(schema_madlib, tbl_source, tbl_output, dep_col,
-                            ind_col, max_iter, tolerance, **kwargs):
+def __perceptron_train_compute(schema_madlib, tbl_source, tbl_output, dep_col, ind_col, optimizer, max_iter, tolerance, **kwargs):
     """
     Create an output table (drop if exists) that contains the perceptron model
     """
@@ -137,7 +183,7 @@ def __perceptron_train_compute(schema_madlib, tbl_source, tbl_output, dep_col,
         plpy.execute("set client_min_messages to error")
     grouping_col = None
     grouping_str = "Null"
-    optimizer = "igd"     
+    #optimizer = "igd"   
     args = {'schema_madlib': schema_madlib,
             'tbl_source': tbl_source,
             'tbl_output': tbl_output,
@@ -150,7 +196,9 @@ def __perceptron_train_compute(schema_madlib, tbl_source, tbl_output, dep_col,
             'tbl_perceptron_state': unique_string(),
             'col_grp_iteration': unique_string(),
             'col_grp_state': unique_string(),
-            'igd': "__perceptron_igd_result"}
+            'igd': "__perceptron_igd_result",
+            'sigmoid': "__sigmoid_igd_result",
+            'tanh': "__tanh_igd_result"}
 
     plpy.execute("select {schema_madlib}.create_schema_pg_temp()".format(**args))
     plpy.execute(
@@ -167,7 +215,7 @@ def __perceptron_train_compute(schema_madlib, tbl_source, tbl_output, dep_col,
     
     iteration_run = __compute_perceptron(schema_madlib, args["tbl_perceptron_args"],
                                       args["tbl_perceptron_state"], tbl_source,
-                                      dep_col, ind_col,
+                                      dep_col, ind_col, optimizer,
                                       col_grp_iteration=args["col_grp_iteration"],
                                       col_grp_state=args["col_grp_state"])
 
@@ -176,126 +224,158 @@ def __perceptron_train_compute(schema_madlib, tbl_source, tbl_output, dep_col,
     using_str = "" if grouping_str1 == "" else "using (" + grouping_col + ")"
     join_str = "," if grouping_str1 == "" else "join "
 
-    plpy.execute(
-        """
-        drop table if exists {tbl_output};
-        create table {tbl_output} as
-            select
-                {grouping_str1}
-                (case when (result).status = 1 then (result).coef
-                    else NULL::double precision[] end) as coef,
-                (case when (result).status = 1 then (result).log_likelihood
-                    else NULL::double precision end) as log_likelihood,
-                (case when (result).status = 1 then (result).std_err
-                    else NULL::double precision[] end) as std_err,
-                (case when (result).status = 1 then (result).z_stats
-                    else NULL::double precision[] end) as z_stats,
-                (case when (result).status = 1 then (result).p_values
-                    else NULL::double precision[] end) as p_values,
-                (case when (result).status = 1 then (result).odds_ratios
-                    else NULL::double precision[] end) as odds_ratios,
-                (case when (result).status = 1 then (result).condition_no
-                    else NULL::double precision end) as condition_no,
-                (case when (result).status = 1 then (result).num_processed
-                    when result is NULL then 0
-                    else NULL::bigint end) as num_rows_processed,
-                (case when (result).status = 1 then num_rows - (result).num_processed
-                    when result is null then num_rows
-                    else NULL::bigint end) as num_missing_rows_skipped,
-                {col_grp_iteration} as num_iterations,
-                (case when (result).status = 1 then (result).vcov
-                    else NULL::double precision[] end) as variance_covariance
-            from
-            (
+    if optimizer == "igd":
+        plpy.execute(
+            """
+            drop table if exists {tbl_output};
+            create table {tbl_output} as
                 select
-                    {col_grp_iteration}, {grouping_str1} result, num_rows
+                    {grouping_str1}
+                    (case when (result).status = 1 then (result).coef
+                        else NULL::double precision[] end) as weights,
+                    (case when (result).status = 1 then (result).log_likelihood
+                        else NULL::double precision end) as log_likelihood,
+                    {col_grp_iteration} as num_iterations
                 from
                 (
-                    (select
-                        {grouping_str1}
-                        {schema_madlib}.{fnName}({col_grp_state}) as result,
-                        {col_grp_iteration}
-                    from
-                        {tbl_perceptron_state}
-                    ) t
-                    join
-                    (
                     select
-                        {grouping_str1}
-                        max({col_grp_iteration}) as {col_grp_iteration}
-                    from {tbl_perceptron_state}
-                    group by {grouping_str2}
-                    ) s
-                    using ({grouping_str1} {col_grp_iteration})
-                ) q1
-                {join_str}
+                        {col_grp_iteration}, {grouping_str1} result, num_rows
+                    from
+                    (
+                        (select
+                            {grouping_str1}
+                            {schema_madlib}.{fnName}({col_grp_state}) as result,
+                            {col_grp_iteration}
+                        from
+                            {tbl_perceptron_state}
+                        ) t
+                        join
+                        (
+                        select
+                            {grouping_str1}
+                            max({col_grp_iteration}) as {col_grp_iteration}
+                        from {tbl_perceptron_state}
+                        group by {grouping_str2}
+                        ) s
+                        using ({grouping_str1} {col_grp_iteration})
+                    ) q1
+                    {join_str}
+                    (
+                        select
+                            {grouping_str1}
+                            count(*) num_rows
+                        from {tbl_source}
+                        group by {grouping_str2}
+                    ) q2
+                    {using_str}
+                ) q3
+            """.format(grouping_str1=grouping_str1,
+                       grouping_str2=grouping_str2,
+                       fnName=args[args["optimizer"]],
+                       iteration_run=iteration_run,
+                       using_str=using_str,
+                       join_str=join_str,
+                       **args))
+    else:
+        plpy.execute(
+            """
+            drop table if exists {tbl_output};
+            create table {tbl_output} as
+                select
+                    {grouping_str1}
+                    (case when (result).status = 1 then (result).coef
+                        else NULL::double precision[] end) as weights,
+                    (case when (result).status = 1 then (result).log_likelihood
+                        else NULL::double precision end) as rmse_error,
+                    {col_grp_iteration} as num_iterations
+                from
                 (
                     select
-                        {grouping_str1}
-                        count(*) num_rows
-                    from {tbl_source}
-                    group by {grouping_str2}
-                ) q2
-                {using_str}
-            ) q3
-        """.format(grouping_str1=grouping_str1,
-                   grouping_str2=grouping_str2,
-                   fnName=args[args["optimizer"]],
-                   iteration_run=iteration_run,
-                   using_str=using_str,
-                   join_str=join_str,
-                   **args))
-
-    failed_groups = plpy.execute("""
-                        select count(*) as count
-                        from {tbl_output}
-                        where coef is Null
-                        """.format(**args))[0]["count"]
-    all_groups = plpy.execute("""
-                    select count(*) as count
-                    from {tbl_output}
-                    """.format(**args))[0]["count"]
-
-    num_rows = plpy.execute(
-        """
-        select
-            sum(num_rows_processed) as num_rows_processed,
-            sum(num_missing_rows_skipped) as num_missing_rows_skipped
-        from {tbl_output}
-        """.format(tbl_output=tbl_output))[0]
-
-    if num_rows['num_rows_processed'] is None:
-        num_rows['num_rows_processed'] = "NULL"
-        num_rows['num_missing_rows_skipped'] = "NULL"
-
-    args.update(num_rows)
-
+                        {col_grp_iteration}, {grouping_str1} result, num_rows
+                    from
+                    (
+                        (select
+                            {grouping_str1}
+                            {schema_madlib}.{fnName}({col_grp_state}) as result,
+                            {col_grp_iteration}
+                        from
+                            {tbl_perceptron_state}
+                        ) t
+                        join
+                        (
+                        select
+                            {grouping_str1}
+                            max({col_grp_iteration}) as {col_grp_iteration}
+                        from {tbl_perceptron_state}
+                        group by {grouping_str2}
+                        ) s
+                        using ({grouping_str1} {col_grp_iteration})
+                    ) q1
+                    {join_str}
+                    (
+                        select
+                            {grouping_str1}
+                            count(*) num_rows
+                        from {tbl_source}
+                        group by {grouping_str2}
+                    ) q2
+                    {using_str}
+                ) q3
+            """.format(grouping_str1=grouping_str1,
+                       grouping_str2=grouping_str2,
+                       fnName=args[args["optimizer"]],
+                       iteration_run=iteration_run,
+                       using_str=using_str,
+                       join_str=join_str,
+                       **args))
+    
     tbl_output_summary = add_postfix(tbl_output, "_summary")
-    plpy.execute(
-        """
-        create table {tbl_output_summary} as
-            select
-                'perceptron'::varchar                  as method,
-                '{tbl_source}'::varchar             as source_table,
-                '{tbl_output}'::varchar             as out_table,
-                '{dep_col}'::varchar                as dependent_varname,
-                '{ind_col}'::varchar                as independent_varname,
-                'optimizer={optimizer}, max_iter={max_iter}, tolerance={tolerance}'::varchar as optimizer_params,
-                {all_groups}::integer as num_all_groups,
-                {failed_groups}::integer            as num_failed_groups,
-                {num_rows_processed}::integer       as num_rows_processed,
-                {num_missing_rows_skipped}::integer as num_missing_rows_skipped,
-                {grouping_col}::text              as grouping_col
-        """.format(all_groups=all_groups,
-                   failed_groups=failed_groups, tbl_output_summary=tbl_output_summary,
-                   grouping_col="'" + grouping_col + "'" if grouping_col else "NULL",
-                   **args))
+    if optimizer == "igd":
+        plpy.execute(
+            """
+            create table {tbl_output_summary} as
+                select
+                    'Log_likelihood'::varchar           as error_function,
+                    '{tbl_source}'::varchar             as source_table,
+                    '{tbl_output}'::varchar             as out_table,
+                    '{dep_col}'::varchar                as dependent_varname,
+                    '{ind_col}'::varchar                as independent_varname,
+                    'activation_fn=sigmoid, max_iter={max_iter}, tolerance={tolerance}'::varchar as optimizer_params
+                   
+                   
+                    
+            """.format(tbl_output_summary=tbl_output_summary, **args))
 
-    # if grouping_col:
-    #     plpy.info(str(all_groups - failed_groups) +
-    #                 " groups succesfully passed, and " +
-    #                 str(failed_groups) + " groups failed")
-
+    if optimizer == "sigmoid":
+        plpy.execute(
+            """
+            create table {tbl_output_summary} as
+                select
+                    'RMSE'::varchar                     as error_function,
+                    '{tbl_source}'::varchar             as source_table,
+                    '{tbl_output}'::varchar             as out_table,
+                    '{dep_col}'::varchar                as dependent_varname,
+                    '{ind_col}'::varchar                as independent_varname,
+                    'activation_fn=sigmoid, max_iter={max_iter}, tolerance={tolerance}'::varchar as optimizer_params
+                   
+                   
+                    
+            """.format(tbl_output_summary=tbl_output_summary, **args))
+    if optimizer == "tanh":
+        plpy.execute(
+            """
+            create table {tbl_output_summary} as
+                select
+                    'RMSE'::varchar                     as error_function,
+                    '{tbl_source}'::varchar             as source_table,
+                    '{tbl_output}'::varchar             as out_table,
+                    '{dep_col}'::varchar                as dependent_varname,
+                    '{ind_col}'::varchar                as independent_varname,
+                    'activation_fn=tan_hyperbolic, max_iter={max_iter}, tolerance={tolerance}'::varchar as optimizer_params
+                   
+                   
+                    
+            """.format(tbl_output_summary=tbl_output_summary, **args))
     plpy.execute("""
                  drop table if exists pg_temp.{tbl_perceptron_args};
                  drop table if exists pg_temp.{tbl_perceptron_state}
@@ -342,7 +422,9 @@ SELECT {schema_madlib}.perceptron_train(
     source_table,         -- name of input table
     out_table,            -- name of output table
     dependent_varname,    -- name of dependent variable
-    independent_varname,  -- names of independent variables  
+    independent_varname,  -- names of independent variables
+    error_function,       -- two options, loglik or rmse
+    actfn,                -- Activation Function, sigmoid or tanh
     max_iter,             -- optional, default 20, maximum iteration number  
     tolerance,            -- optional, default 0.0001, the stopping threshold
 );
@@ -351,18 +433,18 @@ SELECT {schema_madlib}.perceptron_train(
                         OUTPUT
 ------------------------------------------------------------------
 The output table ('out_table' above) has the following columns:
-    'coef',                     double precision[], -- vector of fitting coefficients
-    'log_likelihood',           double precision,   -- log likelihood
-    'num_iterations'            double precision    -- Maximum number of iterations of the perceptron algorithm that the user wants to run before stopping it
-    tolerance               —- Tolerance for the stopping criteria of the algorithm
+    'weights',                     double precision[], -- vector of learnt weights
+    'log_likelihood/RMSE',         double precision,   -- log likelihood or RMSE for training set
+    'num_iterations'               double precision    -- Maximum number of iterations of the perceptron algorithm that the user wants to run before stopping it
+    
 
-A summary table namedselect madlib.perceptron_train('andgate','andgatemod','t', 'ARRAY[1,x,y]',20); <out_table>_summary is also created at the same time, which has:
-    'method'                    varchar,    -- modeling method name ('perceptron')
+A summary table named <out_table>_summary is also created:
+    'error_function'            varchar,    -- error function name ('Log_likelihood' or 'RMSE')
     'source_table'              varchar,    -- the data source table name
     'out_table'                 varchar,    -- the output table name
     'dependent_varname'         varchar,    -- the dependent variable
     'independent_varname'       varchar,    -- the independent variable
-    'optimizer_params'          varchar,    -- 'optimizer=..., max_iter=..., tolerance=...'
+    'optimizer_params'          varchar,    -- 'activation_fn=..., max_iter=..., tolerance=...'
     """
     elif message in ['example', 'examples']:
 
@@ -405,7 +487,7 @@ DROP TABLE IF EXISTS model_summary;
 SELECT madlib.perceptron_train( 'andgate',
                              'model',
                              'label',
-                             'ARRAY[1, x, y]',
+                             'ARRAY[1, x, y]', 'loglik', 'sigmoid'
                            );
 
 SELECT * from model;
@@ -442,11 +524,11 @@ Prediction in Perceptron is done my Perceptron predict function.
                         USAGE
 ------------------------------------------------------------------
 perceptron_predict(
-    coef,        -- DOUBLE PRECISION[], Learnt weights by Perceptron
+    weights,        -- DOUBLE PRECISION[], Learnt weights by Perceptron
     col_ind_var  -- DOUBLE PRECISION[], Values for the independent variables
 )
 
-The lengths of 'coef' array and 'col_ind_var' array above should be equal.
+The lengths of 'weight' array and 'col_ind_var' array above should be equal.
 ------------------------------------------------------------------
                         OUTPUT
 ------------------------------------------------------------------
@@ -490,11 +572,17 @@ independent variables.
                         USAGE
 ------------------------------------------------------------------
 perceptron_predict_prob(
-    coef,        -- DOUBLE PRECISION[], Learnt weights of Perceptron
+    weights,        -- DOUBLE PRECISION[], Learnt weights of Perceptron
     col_ind_var  -- DOUBLE PRECISION[], Values for the independent variables
 )
 
-The lengths of 'coef' array and 'col_ind_var' array above should be equal.
+Following method should be used for tanh activation function:
+
+perceptron_predict_prob_tanh(
+    weights,        -- DOUBLE PRECISION[], Learnt weights of Perceptron
+    col_ind_var  -- DOUBLE PRECISION[], Values for the independent variables
+)
+The lengths of 'weights' array and 'col_ind_var' array above should be equal.
 ------------------------------------------------------------------
                         OUTPUT
 ------------------------------------------------------------------

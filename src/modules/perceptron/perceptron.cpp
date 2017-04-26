@@ -48,7 +48,12 @@ inline double sigma(double x) {
  * @brief TANH
  */
 inline double tanh(double x) {
-    return (std::exp(x) - std::exp(-x)) / (std::exp(x) + std::exp(-x));
+    if (x>0.){
+        return (1. - std::exp(-2*x)) / (1. + std::exp(-2*x));
+    }
+    else{
+        return (std::exp(2*x) - 1.) / (std::exp(2*x) + 1.);
+    }
 }
 
 /**
@@ -59,6 +64,487 @@ inline double relu(double x) {
 }
 
 
+//////////////////////////TANH////////////////////////////////
+template <class Handle>
+class TanhIGDTransitionState {
+    template <class OtherHandle>
+    friend class TanhIGDTransitionState;
+
+  public:
+    TanhIGDTransitionState(const AnyType &inArray)
+        : mStorage(inArray.getAs<Handle>()) {
+
+        rebind(static_cast<uint16_t>(mStorage[0]));
+    }
+
+    
+    inline operator AnyType() const {
+        return mStorage;
+    }
+
+    
+    inline void initialize(const Allocator &inAllocator, uint16_t inWidthOfX) {
+        mStorage = inAllocator.allocateArray<double, dbal::AggregateContext,
+                                             dbal::DoZero, dbal::ThrowBadAlloc>(arraySize(inWidthOfX));
+        rebind(inWidthOfX);
+        widthOfX = inWidthOfX;
+    }
+
+    
+    template <class OtherHandle>
+    TanhIGDTransitionState &operator=(
+        const TanhIGDTransitionState<OtherHandle> &inOtherState) {
+
+        for (size_t i = 0; i < mStorage.size(); i++)
+            mStorage[i] = inOtherState.mStorage[i];
+        return *this;
+    }
+
+    
+    template <class OtherHandle>
+    TanhIGDTransitionState &operator+=(
+        const TanhIGDTransitionState<OtherHandle> &inOtherState) {
+
+        if (mStorage.size() != inOtherState.mStorage.size() ||
+            widthOfX != inOtherState.widthOfX)
+            throw std::logic_error("Internal error: Incompatible transition "
+                                   "states");
+
+        
+        double totalNumRows = static_cast<double>(numRows)
+            + static_cast<double>(inOtherState.numRows);
+        coef = double(numRows) / totalNumRows * coef
+            + double(inOtherState.numRows) / totalNumRows * inOtherState.coef;
+
+        numRows += inOtherState.numRows;
+        X_transp_AX += inOtherState.X_transp_AX;
+        rmseerror += inOtherState.rmseerror;
+        status = (inOtherState.status == TERMINATED) ? inOtherState.status : status;
+        return *this;
+    }
+
+    
+    inline void reset() {
+        stepsize = .01;
+        numRows = 0;
+        X_transp_AX.fill(0.01);
+        rmseerror = 0;
+        status = IN_PROCESS;
+    }
+
+  private:
+    static inline uint32_t arraySize(const uint16_t inWidthOfX) {
+        return 5 + inWidthOfX * inWidthOfX + inWidthOfX;
+    }
+    
+    void rebind(uint16_t inWidthOfX) {
+        widthOfX.rebind(&mStorage[0]);
+        stepsize.rebind(&mStorage[1]);
+        coef.rebind(&mStorage[2], inWidthOfX);
+        numRows.rebind(&mStorage[2 + inWidthOfX]);
+        X_transp_AX.rebind(&mStorage[3 + inWidthOfX], inWidthOfX, inWidthOfX);
+        rmseerror.rebind(&mStorage[3 + inWidthOfX * inWidthOfX + inWidthOfX]);
+        status.rebind(&mStorage[4 + inWidthOfX * inWidthOfX + inWidthOfX]);
+    }
+
+    Handle mStorage;
+
+  public:
+    typename HandleTraits<Handle>::ReferenceToUInt16 widthOfX;
+    typename HandleTraits<Handle>::ReferenceToDouble stepsize;
+    typename HandleTraits<Handle>::ColumnVectorTransparentHandleMap coef;
+
+    typename HandleTraits<Handle>::ReferenceToUInt64 numRows;
+    typename HandleTraits<Handle>::MatrixTransparentHandleMap X_transp_AX;
+    typename HandleTraits<Handle>::ReferenceToDouble rmseerror;
+    typename HandleTraits<Handle>::ReferenceToUInt16 status;
+};
+
+AnyType
+tanh_igd_step_transition::run(AnyType &args) {
+    TanhIGDTransitionState<MutableArrayHandle<double> > state = args[0];
+    if (args[1].isNull() || args[2].isNull()) { return args[0]; }
+    double y = args[1].getAs<bool>() ? 1. : -1;
+    MappedColumnVector x;
+    try {
+        // an exception is raised in the backend if args[2] contains nulls
+        MappedColumnVector xx = args[2].getAs<MappedColumnVector>();
+        // x is a const reference, we can only rebind to change its pointer
+        x.rebind(xx.memoryHandle(), xx.size());
+    } catch (const ArrayWithNullException &e) {
+        return args[0];
+    }
+    if (!x.is_finite()){
+        warning("Design matrix is not finite.");
+        state.status = TERMINATED;
+        return state;
+    }
+
+    // We only know the number of independent variables after seeing the first
+    // row.
+    if (state.numRows == 0) {
+        if (x.size() > std::numeric_limits<uint16_t>::max()){
+            warning("Number of independent variables cannot be larger than 65535.");
+            state.status = TERMINATED;
+            return state;
+        }
+
+        state.initialize(*this, static_cast<uint16_t>(x.size()));
+
+        // For the first iteration, the previous state is NULL
+        if (!args[3].isNull()) {
+            TanhIGDTransitionState<ArrayHandle<double> > previousState = args[3];
+            state = previousState;
+            state.reset();
+        }
+    }
+
+    // Now do the transition step
+    state.numRows++;
+
+    // xc = x^T_i c
+    double xc = dot(x, state.coef);
+    double o = tanh(xc);
+    double scale = state.stepsize * (y - o)*(1 - (o*o));
+    //double scale = state.stepsize * sigma(-xc * y) * y;
+    state.coef += scale * x;
+
+    // Note: previous coefficients are used for Hessian and log likelihood
+    if (!args[3].isNull()) {
+        TanhIGDTransitionState<ArrayHandle<double> > previousState = args[3];
+
+        double previous_xc = dot(x, previousState.coef);
+
+        // a_i = sigma(x_i c) sigma(-x_i c)
+        double a = sigma(previous_xc) * sigma(-previous_xc);
+        //triangularView<Lower>(state.X_transp_AX) += x * trans(x) * a;
+        state.X_transp_AX += x * trans(x) * a;
+
+        // l_i(c) = - ln(1 + exp(-y_i * c^T x_i))
+        //state.logLikelihood -= std::log( 1. + std::exp(-y * previous_xc) );
+        state.rmseerror += 0.5*((y-o) * (y-o));
+    }
+
+    return state;
+}
+
+AnyType
+tanh_igd_step_merge_states::run(AnyType &args) {
+    TanhIGDTransitionState<MutableArrayHandle<double> > stateLeft = args[0];
+    TanhIGDTransitionState<ArrayHandle<double> > stateRight = args[1];
+
+    // We first handle the trivial case where this function is called with one
+    // of the states being the initial state
+    if (stateLeft.numRows == 0)
+        return stateRight;
+    else if (stateRight.numRows == 0)
+        return stateLeft;
+
+    // Merge states together and return
+    stateLeft += stateRight;
+    return stateLeft;
+}
+
+
+AnyType
+tanh_igd_step_final::run(AnyType &args) {
+    TanhIGDTransitionState<MutableArrayHandle<double> > state = args[0];
+
+    if(!state.coef.is_finite()){
+        warning("Overflow or underflow in incremental-gradient iteration. Input"
+              "data is likely of poor numerical condition.");
+        state.status = TERMINATED;
+        return state;
+    }
+
+    // Aggregates that haven't seen any data just return Null.
+    if (state.numRows == 0){
+        state.status = NULL_EMPTY;
+        return state;
+    }
+    state.rmseerror = std::sqrt(state.rmseerror/double(state.numRows));
+
+    return state;
+}
+
+/**
+ * @brief Return the difference in log-likelihood between two states
+ */
+AnyType
+internal_tanh_igd_step_distance::run(AnyType &args) {
+    TanhIGDTransitionState<ArrayHandle<double> > stateLeft = args[0];
+    TanhIGDTransitionState<ArrayHandle<double> > stateRight = args[1];
+
+    if(stateLeft.status == NULL_EMPTY || stateRight.status == NULL_EMPTY){
+        return 0.0;
+    }
+
+    return std::abs(stateLeft.rmseerror - stateRight.rmseerror);
+}
+
+/**
+ * @brief Return the coefficients and diagnostic statistics of the state
+ */
+AnyType
+internal_tanh_igd_result::run(AnyType &args) {
+    TanhIGDTransitionState<ArrayHandle<double> > state = args[0];
+
+    if (state.status == NULL_EMPTY)
+        return Null();
+
+    SymmetricPositiveDefiniteEigenDecomposition<Matrix> decomposition(
+        state.X_transp_AX, EigenvaluesOnly, ComputePseudoInverse);
+
+    return stateToResult(*this, state.coef,
+                         state.X_transp_AX,
+                         state.rmseerror,
+                         state.status, state.numRows);
+}
+////////////////////////TANH ENDS/////////////////////////
+
+
+
+//////////////////NEW SIGMOID//////////////////////////////////
+template <class Handle>
+class SigmoidIGDTransitionState {
+    template <class OtherHandle>
+    friend class SigmoidIGDTransitionState;
+
+  public:
+    SigmoidIGDTransitionState(const AnyType &inArray)
+        : mStorage(inArray.getAs<Handle>()) {
+
+        rebind(static_cast<uint16_t>(mStorage[0]));
+    }
+
+    
+    inline operator AnyType() const {
+        return mStorage;
+    }
+
+    
+    inline void initialize(const Allocator &inAllocator, uint16_t inWidthOfX) {
+        mStorage = inAllocator.allocateArray<double, dbal::AggregateContext,
+                                             dbal::DoZero, dbal::ThrowBadAlloc>(arraySize(inWidthOfX));
+        rebind(inWidthOfX);
+        widthOfX = inWidthOfX;
+    }
+
+    
+    template <class OtherHandle>
+    SigmoidIGDTransitionState &operator=(
+        const SigmoidIGDTransitionState<OtherHandle> &inOtherState) {
+
+        for (size_t i = 0; i < mStorage.size(); i++)
+            mStorage[i] = inOtherState.mStorage[i];
+        return *this;
+    }
+
+    
+    template <class OtherHandle>
+    SigmoidIGDTransitionState &operator+=(
+        const SigmoidIGDTransitionState<OtherHandle> &inOtherState) {
+
+        if (mStorage.size() != inOtherState.mStorage.size() ||
+            widthOfX != inOtherState.widthOfX)
+            throw std::logic_error("Internal error: Incompatible transition "
+                                   "states");
+
+        
+        double totalNumRows = static_cast<double>(numRows)
+            + static_cast<double>(inOtherState.numRows);
+        coef = double(numRows) / totalNumRows * coef
+            + double(inOtherState.numRows) / totalNumRows * inOtherState.coef;
+
+        numRows += inOtherState.numRows;
+        X_transp_AX += inOtherState.X_transp_AX;
+        rmseerror += inOtherState.rmseerror;
+        status = (inOtherState.status == TERMINATED) ? inOtherState.status : status;
+        return *this;
+    }
+
+    
+    inline void reset() {
+        stepsize = .01;
+        numRows = 0;
+        X_transp_AX.fill(0.01);
+        rmseerror = 0;
+        status = IN_PROCESS;
+    }
+
+  private:
+    static inline uint32_t arraySize(const uint16_t inWidthOfX) {
+        return 5 + inWidthOfX * inWidthOfX + inWidthOfX;
+    }
+    
+    void rebind(uint16_t inWidthOfX) {
+        widthOfX.rebind(&mStorage[0]);
+        stepsize.rebind(&mStorage[1]);
+        coef.rebind(&mStorage[2], inWidthOfX);
+        numRows.rebind(&mStorage[2 + inWidthOfX]);
+        X_transp_AX.rebind(&mStorage[3 + inWidthOfX], inWidthOfX, inWidthOfX);
+        rmseerror.rebind(&mStorage[3 + inWidthOfX * inWidthOfX + inWidthOfX]);
+        status.rebind(&mStorage[4 + inWidthOfX * inWidthOfX + inWidthOfX]);
+    }
+
+    Handle mStorage;
+
+  public:
+    typename HandleTraits<Handle>::ReferenceToUInt16 widthOfX;
+    typename HandleTraits<Handle>::ReferenceToDouble stepsize;
+    typename HandleTraits<Handle>::ColumnVectorTransparentHandleMap coef;
+
+    typename HandleTraits<Handle>::ReferenceToUInt64 numRows;
+    typename HandleTraits<Handle>::MatrixTransparentHandleMap X_transp_AX;
+    typename HandleTraits<Handle>::ReferenceToDouble rmseerror;
+    typename HandleTraits<Handle>::ReferenceToUInt16 status;
+};
+
+AnyType
+sigmoid_igd_step_transition::run(AnyType &args) {
+    SigmoidIGDTransitionState<MutableArrayHandle<double> > state = args[0];
+    if (args[1].isNull() || args[2].isNull()) { return args[0]; }
+    double y = args[1].getAs<bool>() ? 1. : 0;
+    MappedColumnVector x;
+    try {
+        // an exception is raised in the backend if args[2] contains nulls
+        MappedColumnVector xx = args[2].getAs<MappedColumnVector>();
+        // x is a const reference, we can only rebind to change its pointer
+        x.rebind(xx.memoryHandle(), xx.size());
+    } catch (const ArrayWithNullException &e) {
+        return args[0];
+    }
+    if (!x.is_finite()){
+        warning("Design matrix is not finite.");
+        state.status = TERMINATED;
+        return state;
+    }
+
+    // We only know the number of independent variables after seeing the first
+    // row.
+    if (state.numRows == 0) {
+        if (x.size() > std::numeric_limits<uint16_t>::max()){
+            warning("Number of independent variables cannot be larger than 65535.");
+            state.status = TERMINATED;
+            return state;
+        }
+
+        state.initialize(*this, static_cast<uint16_t>(x.size()));
+
+        // For the first iteration, the previous state is NULL
+        if (!args[3].isNull()) {
+            SigmoidIGDTransitionState<ArrayHandle<double> > previousState = args[3];
+            state = previousState;
+            state.reset();
+        }
+    }
+
+    // Now do the transition step
+    state.numRows++;
+
+    // xc = x^T_i c
+    double xc = dot(x, state.coef);
+    double o = sigma(xc);
+    double scale = state.stepsize * (y - o)*(o)*(1 - o);
+    //double scale = state.stepsize * sigma(-xc * y) * y;
+    state.coef += scale * x;
+
+    // Note: previous coefficients are used for Hessian and log likelihood
+    if (!args[3].isNull()) {
+        SigmoidIGDTransitionState<ArrayHandle<double> > previousState = args[3];
+
+        double previous_xc = dot(x, previousState.coef);
+
+        // a_i = sigma(x_i c) sigma(-x_i c)
+        double a = sigma(previous_xc) * sigma(-previous_xc);
+        //triangularView<Lower>(state.X_transp_AX) += x * trans(x) * a;
+        state.X_transp_AX += x * trans(x) * a;
+
+        // l_i(c) = - ln(1 + exp(-y_i * c^T x_i))
+        //state.logLikelihood -= std::log( 1. + std::exp(-y * previous_xc) );
+        state.rmseerror += 0.5*((y-o) * (y-o));
+    }
+
+    return state;
+}
+
+AnyType
+sigmoid_igd_step_merge_states::run(AnyType &args) {
+    SigmoidIGDTransitionState<MutableArrayHandle<double> > stateLeft = args[0];
+    SigmoidIGDTransitionState<ArrayHandle<double> > stateRight = args[1];
+
+    // We first handle the trivial case where this function is called with one
+    // of the states being the initial state
+    if (stateLeft.numRows == 0)
+        return stateRight;
+    else if (stateRight.numRows == 0)
+        return stateLeft;
+
+    // Merge states together and return
+    stateLeft += stateRight;
+    return stateLeft;
+}
+
+
+AnyType
+sigmoid_igd_step_final::run(AnyType &args) {
+    SigmoidIGDTransitionState<MutableArrayHandle<double> > state = args[0];
+
+    if(!state.coef.is_finite()){
+        warning("Overflow or underflow in incremental-gradient iteration. Input"
+              "data is likely of poor numerical condition.");
+        state.status = TERMINATED;
+        return state;
+    }
+
+    // Aggregates that haven't seen any data just return Null.
+    if (state.numRows == 0){
+        state.status = NULL_EMPTY;
+        return state;
+    }
+    state.rmseerror = std::sqrt(state.rmseerror/double(state.numRows));
+
+    return state;
+}
+
+/**
+ * @brief Return the difference in log-likelihood between two states
+ */
+AnyType
+internal_sigmoid_igd_step_distance::run(AnyType &args) {
+    SigmoidIGDTransitionState<ArrayHandle<double> > stateLeft = args[0];
+    SigmoidIGDTransitionState<ArrayHandle<double> > stateRight = args[1];
+
+    if(stateLeft.status == NULL_EMPTY || stateRight.status == NULL_EMPTY){
+        return 0.0;
+    }
+
+    return std::abs(stateLeft.rmseerror - stateRight.rmseerror);
+}
+
+/**
+ * @brief Return the coefficients and diagnostic statistics of the state
+ */
+AnyType
+internal_sigmoid_igd_result::run(AnyType &args) {
+    SigmoidIGDTransitionState<ArrayHandle<double> > state = args[0];
+
+    if (state.status == NULL_EMPTY)
+        return Null();
+
+    SymmetricPositiveDefiniteEigenDecomposition<Matrix> decomposition(
+        state.X_transp_AX, EigenvaluesOnly, ComputePseudoInverse);
+
+    return stateToResult(*this, state.coef,
+                         state.X_transp_AX,
+                         state.rmseerror,
+                         state.status, state.numRows);
+}
+
+
+
+
+//////////////////NEW SIGMOID END//////////////////////////////////
 
 template <class Handle>
 class PerceptronIGDTransitionState {
@@ -827,6 +1313,43 @@ AnyType perceptron_predict_prob::run(AnyType &args) {
     double logit = 0.0;
     try {
         logit = 1.0 / (1 + exp(-dot));
+    } catch (...) {
+        logit = (dot > 0) ? 1.0 : 0.0;
+    }
+    return logit;
+}
+
+AnyType perceptron_predict_prob_tanh::run(AnyType &args) {
+    try {
+        args[0].getAs<MappedColumnVector>();
+    } catch (const ArrayWithNullException &e) {
+        throw std::runtime_error(
+            "Perceptron error: the coefficients contain NULL values");
+    }
+
+    try {
+        args[1].getAs<MappedColumnVector>();
+    } catch (const ArrayWithNullException &e) {
+        return Null();
+    }
+
+    MappedColumnVector vec1 = args[0].getAs<MappedColumnVector>();
+    MappedColumnVector vec2 = args[1].getAs<MappedColumnVector>();
+
+    if (vec1.size() != vec2.size())
+        throw std::runtime_error(
+            "Coefficients and independent variables are of incompatible length");
+
+    double dot = vec1.dot(vec2);
+    double logit = 0.0;
+    try {
+        logit = 1.0 / (1 + exp(-dot));
+        if (dot>0.){
+        return (((1. - std::exp(-2*dot)) / (1. + std::exp(-2*dot)))+1)/2;
+    }
+    else{
+        return (((std::exp(2*dot) - 1.) / (std::exp(2*dot) + 1.))+1)/2;
+    }
     } catch (...) {
         logit = (dot > 0) ? 1.0 : 0.0;
     }

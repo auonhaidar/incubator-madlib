@@ -156,6 +156,8 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.perceptron_train (
     out_table           VARCHAR,
     dependent_varname   VARCHAR,
     independent_varname VARCHAR,
+    errorfn             VARCHAR,
+    actfn               VARCHAR,
     max_iter            INTEGER,
     tolerance           DOUBLE PRECISION
     
@@ -170,9 +172,11 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.perceptron_train (
     source_table        VARCHAR,
     out_table           VARCHAR,
     dependent_varname   VARCHAR,
-    independent_varname VARCHAR)
+    independent_varname VARCHAR,
+    errorfn             VARCHAR,
+    actfn               VARCHAR)
 RETURNS VOID AS $$
-    SELECT MADLIB_SCHEMA.perceptron_train($1, $2, $3, $4, 20, 0.0001);
+    SELECT MADLIB_SCHEMA.perceptron_train($1, $2, $3, $4, $5, $6, 20, 0.0001);
 $$ LANGUAGE sql VOLATILE
 m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `MODIFIES SQL DATA', `');
 
@@ -185,9 +189,11 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.perceptron_train (
     out_table           VARCHAR,
     dependent_varname   VARCHAR,
     independent_varname VARCHAR,
+    errorfn             VARCHAR,
+    actfn               VARCHAR,
     max_iter            INTEGER)
 RETURNS VOID AS $$
-    SELECT MADLIB_SCHEMA.perceptron_train($1, $2, $3, $4, $5, 0.0001);
+    SELECT MADLIB_SCHEMA.perceptron_train($1, $2, $3, $4, $5, $6, $7, 0.0001);
 $$LANGUAGE sql VOLATILE
 m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `MODIFIES SQL DATA', `');
 
@@ -259,6 +265,15 @@ AS 'MODULE_PATHNAME', 'perceptron_predict_prob'
 LANGUAGE C STRICT IMMUTABLE
 m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
 
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.perceptron_predict_prob_tanh(
+    coef            DOUBLE PRECISION[],
+    col_ind_var     DOUBLE PRECISION[]
+) RETURNS DOUBLE PRECISION
+AS 'MODULE_PATHNAME', 'perceptron_predict_prob_tanh'
+LANGUAGE C STRICT IMMUTABLE
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
 -- Help messages -------------------------------------------------------
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.perceptron_predict_prob(
     message    TEXT
@@ -276,3 +291,165 @@ $$ LANGUAGE SQL IMMUTABLE
 m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `CONTAINS SQL', `');
 
 -------------------------------------------------------------
+-------------------------------------------------------------
+-------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sigmoid_igd_step_transition(
+    DOUBLE PRECISION[],
+    BOOLEAN,
+    DOUBLE PRECISION[],
+    DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION[]
+AS 'MODULE_PATHNAME', 'sigmoid_igd_step_transition'
+LANGUAGE C IMMUTABLE
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+------------------------------------------------------------------------
+
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sigmoid_igd_step_merge_states(
+    state1 DOUBLE PRECISION[],
+    state2 DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION[]
+AS 'MODULE_PATHNAME', 'sigmoid_igd_step_merge_states'
+LANGUAGE C IMMUTABLE STRICT
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+
+
+------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sigmoid_igd_step_final(
+    state DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION[]
+AS 'MODULE_PATHNAME', 'sigmoid_igd_step_final'
+LANGUAGE C IMMUTABLE STRICT
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+------------------------------------------------------------------------
+
+
+
+/**
+ * @internal
+ * @brief Perform one iteration of the incremental gradient
+ *        method for computing perceptron
+ */
+DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.__sigmoid_igd_step(
+    BOOLEAN, DOUBLE PRECISION[], DOUBLE PRECISION[]);
+CREATE AGGREGATE MADLIB_SCHEMA.__sigmoid_igd_step(
+    /*+ y */ BOOLEAN,
+    /*+ x */ DOUBLE PRECISION[],
+    /*+ previous_state */ DOUBLE PRECISION[]) (
+
+    STYPE=DOUBLE PRECISION[],
+    SFUNC=MADLIB_SCHEMA.__sigmoid_igd_step_transition,
+    m4_ifdef(`__POSTGRESQL__', `', `prefunc=MADLIB_SCHEMA.__sigmoid_igd_step_merge_states,')
+    FINALFUNC=MADLIB_SCHEMA.__sigmoid_igd_step_final,
+    INITCOND='{0,0,0,0,0}'
+);
+
+
+
+------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sigmoid_igd_step_distance(
+    /*+ state1 */ DOUBLE PRECISION[],
+    /*+ state2 */ DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION AS
+'MODULE_PATHNAME', 'internal_sigmoid_igd_step_distance'
+LANGUAGE c IMMUTABLE STRICT
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sigmoid_igd_result(
+    /*+ state */ DOUBLE PRECISION[])
+RETURNS MADLIB_SCHEMA.__perceptron_result AS
+'MODULE_PATHNAME', 'internal_sigmoid_igd_result'
+LANGUAGE c IMMUTABLE STRICT
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+
+
+-------------------------------------------------------------
+-------------------------------------------------------------
+-------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__tanh_igd_step_transition(
+    DOUBLE PRECISION[],
+    BOOLEAN,
+    DOUBLE PRECISION[],
+    DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION[]
+AS 'MODULE_PATHNAME', 'tanh_igd_step_transition'
+LANGUAGE C IMMUTABLE
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+------------------------------------------------------------------------
+
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__tanh_igd_step_merge_states(
+    state1 DOUBLE PRECISION[],
+    state2 DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION[]
+AS 'MODULE_PATHNAME', 'tanh_igd_step_merge_states'
+LANGUAGE C IMMUTABLE STRICT
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+
+
+------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__tanh_igd_step_final(
+    state DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION[]
+AS 'MODULE_PATHNAME', 'tanh_igd_step_final'
+LANGUAGE C IMMUTABLE STRICT
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+------------------------------------------------------------------------
+
+
+
+/**
+ * @internal
+ * @brief Perform one iteration of the incremental gradient
+ *        method for computing perceptron
+ */
+DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.__tanh_igd_step(
+    BOOLEAN, DOUBLE PRECISION[], DOUBLE PRECISION[]);
+CREATE AGGREGATE MADLIB_SCHEMA.__tanh_igd_step(
+    /*+ y */ BOOLEAN,
+    /*+ x */ DOUBLE PRECISION[],
+    /*+ previous_state */ DOUBLE PRECISION[]) (
+
+    STYPE=DOUBLE PRECISION[],
+    SFUNC=MADLIB_SCHEMA.__tanh_igd_step_transition,
+    m4_ifdef(`__POSTGRESQL__', `', `prefunc=MADLIB_SCHEMA.__tanh_igd_step_merge_states,')
+    FINALFUNC=MADLIB_SCHEMA.__tanh_igd_step_final,
+    INITCOND='{0,0,0,0,0}'
+);
+
+
+
+------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__tanh_igd_step_distance(
+    /*+ state1 */ DOUBLE PRECISION[],
+    /*+ state2 */ DOUBLE PRECISION[])
+RETURNS DOUBLE PRECISION AS
+'MODULE_PATHNAME', 'internal_tanh_igd_step_distance'
+LANGUAGE c IMMUTABLE STRICT
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__tanh_igd_result(
+    /*+ state */ DOUBLE PRECISION[])
+RETURNS MADLIB_SCHEMA.__perceptron_result AS
+'MODULE_PATHNAME', 'internal_tanh_igd_result'
+LANGUAGE c IMMUTABLE STRICT
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
